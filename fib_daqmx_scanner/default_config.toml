@@ -1,0 +1,28 @@
+[scanning]
+    xmin = -500
+    xmax = 500
+    ymin = -500
+    ymax = 500
+    dwell_time = 1000
+    nx = 256
+    ny = 256
+    xcal = 60
+    ycal = 60
+    acquire = 0
+
+[beam_blanker]
+    voltage = 90
+
+[connections]
+    CEM = "Dev1/ctr0"
+    faraday_cup = "Dev1/ai0"
+    target = "Dev1/ai1"
+    scan_x = "Dev1/ao0"
+    scan_y = "Dev1/ao1"
+    beam_blanker = "Dev1/ao2"
+
+[monitoring]
+    sample_rate = 10
+    plot_buffer = 1000
+    faraday_cup_gain = 7
+    target_gain = 7
