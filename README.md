@@ -5,3 +5,5 @@ DAQmx device.
 
 It is currently under development for the cold ion beam experiment in the Scholten group
 at the University of Melbourne.
+
+![Screenshot](screenshot.png)
