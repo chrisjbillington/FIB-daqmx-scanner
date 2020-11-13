@@ -22,7 +22,7 @@
         <string>...</string>
        </property>
        <property name="icon">
-        <iconset resource="../../../venvs/labscript/qtutils/icons/icons.qrc">
+        <iconset>
          <normaloff>:/qtutils/fugue/control.png</normaloff>:/qtutils/fugue/control.png</iconset>
        </property>
       </widget>
@@ -33,7 +33,7 @@
         <string>...</string>
        </property>
        <property name="icon">
-        <iconset resource="../../../venvs/labscript/qtutils/icons/icons.qrc">
+        <iconset>
          <normaloff>:/qtutils/fugue/control-stop-square.png</normaloff>:/qtutils/fugue/control-stop-square.png</iconset>
        </property>
       </widget>
@@ -116,7 +116,7 @@
                   <string>Start</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../../venvs/labscript/qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/control.png</normaloff>:/qtutils/fugue/control.png</iconset>
                  </property>
                 </widget>
@@ -127,7 +127,7 @@
                   <string>Stop</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../../venvs/labscript/qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/control-stop-square.png</normaloff>:/qtutils/fugue/control-stop-square.png</iconset>
                  </property>
                 </widget>
@@ -138,7 +138,7 @@
                   <string>Repeat</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../../venvs/labscript/qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/arrow-repeat.png</normaloff>:/qtutils/fugue/arrow-repeat.png</iconset>
                  </property>
                  <property name="checkable">
@@ -152,7 +152,7 @@
                   <string>Clear</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../../venvs/labscript/qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/eraser.png</normaloff>:/qtutils/fugue/eraser.png</iconset>
                  </property>
                  <property name="checkable">
@@ -437,8 +437,11 @@
                 <string>Enable</string>
                </property>
                <property name="icon">
-                <iconset resource="../../../venvs/labscript/qtutils/icons/icons.qrc">
+                <iconset>
                  <normaloff>:/qtutils/fugue/traffic-light-red.png</normaloff>:/qtutils/fugue/traffic-light-red.png</iconset>
+               </property>
+               <property name="checkable">
+                <bool>true</bool>
                </property>
               </widget>
              </item>
@@ -548,6 +551,9 @@
                  <property name="suffix">
                   <string> Hz</string>
                  </property>
+                 <property name="minimum">
+                  <number>10</number>
+                 </property>
                  <property name="maximum">
                   <number>1000</number>
                  </property>
@@ -573,6 +579,9 @@
                </item>
                <item row="0" column="1">
                 <widget class="QSpinBox" name="spinBoxPlotBuffer">
+                 <property name="keyboardTracking">
+                  <bool>false</bool>
+                 </property>
                  <property name="suffix">
                   <string> samples</string>
                  </property>
@@ -636,7 +645,7 @@
             <item>
              <widget class="QLabel" name="label_11">
               <property name="text">
-               <string>Faraday Cup:</string>
+               <string>Faraday cup:</string>
               </property>
              </widget>
             </item>
@@ -821,8 +830,6 @@
   <tabstop>spinBoxFaradayCupGain</tabstop>
   <tabstop>spinBoxTargetGain</tabstop>
  </tabstops>
- <resources>
-  <include location="../../../venvs/labscript/qtutils/icons/icons.qrc"/>
- </resources>
+ <resources/>
  <connections/>
 </ui>
