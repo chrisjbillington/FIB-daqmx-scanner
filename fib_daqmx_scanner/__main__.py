@@ -3,6 +3,8 @@ import signal
 from pathlib import Path
 from enum import IntEnum
 import threading
+from queue import Queue, Empty
+import ctypes
 
 import appdirs
 
@@ -14,14 +16,18 @@ import qtutils.icons
 import pyqtgraph as pg
 
 from PyDAQmx import Task
-from PyDAQmx.DAQmxFunctions import DAQmxGetBufInputBufSize
+from PyDAQmx.DAQmxFunctions import (
+    SamplesNotYetAvailableError,
+    InvalidTaskError,
+    DAQmxGetSampClkTerm,
+)
 from PyDAQmx.DAQmxConstants import (
     DAQmx_Val_RSE,
     DAQmx_Val_Volts,
     DAQmx_Val_Rising,
     DAQmx_Val_ContSamps,
-    DAQmx_Val_Acquired_Into_Buffer,
     DAQmx_Val_GroupByScanNumber,
+    DAQmx_Val_CountUp,
 )
 
 from PyDAQmx.DAQmxTypes import DAQmxEveryNSamplesEventCallbackPtr, int32, uInt32
@@ -54,6 +60,16 @@ class RollingData:
             )
 
 
+def queue_getall(queue):
+    """Return a list of all items in a Queue"""
+    items = []
+    while True:
+        try:
+            items.append(queue.get_nowait())
+        except Empty:
+            return items
+
+
 class state(IntEnum):
     STOPPED = 0
     RUNNING = 1
@@ -62,7 +78,7 @@ class state(IntEnum):
 
 class App:
     MAX_READ_PTS = 10000
-    MAX_READ_INTERVAL = 1 / 30
+    MAX_READ_INTERVAL = 1 / 60
 
     def __init__(self):
         self.ui = loader = UiLoader()
@@ -78,6 +94,7 @@ class App:
         self.fc_plot = self.fc_plotwidget.addPlot()
         self.fc_plot.setDownsampling(mode='peak')
         self.fc_data = RollingData(self.ui.spinBoxPlotBuffer.value())
+        self.fc_data_queue = Queue()
         self.fc_gain = 10 ** self.ui.spinBoxFaradayCupGain.value()
         self.fc_curve = self.fc_plot.plot(self.fc_data.data)
         self.fc_plot.setLabel('left', 'Faraday cup current', units='A')
@@ -88,6 +105,7 @@ class App:
         self.target_plot = self.target_plotwidget.addPlot()
         self.target_plot.setDownsampling(mode='peak')
         self.target_data = RollingData(self.ui.spinBoxPlotBuffer.value())
+        self.target_data_queue = Queue()
         self.target_gain = 10 ** self.ui.spinBoxTargetGain.value()
         self.target_curve = self.target_plot.plot(self.target_data.data)
         self.target_plot.setLabel('left', 'target current', units='A')
@@ -98,6 +116,7 @@ class App:
         self.cem_plot = self.cem_plotwidget.addPlot()
         self.cem_plot.setDownsampling(mode='peak')
         self.cem_data = RollingData(self.ui.spinBoxPlotBuffer.value())
+        self.cem_data_queue = Queue()
         self.cem_binwidth = 1 / self.ui.spinBoxSampleRate.value()
         self.cem_curve = self.cem_plot.plot(self.cem_data.data)
         self.cem_plot.setLabel('left', 'CEM counts', units='counts s⁻¹')
@@ -113,44 +132,46 @@ class App:
         self.ui.spinBoxFaradayCupGain.valueChanged.connect(self.on_fc_gain_changed)
         self.ui.spinBoxTargetGain.valueChanged.connect(self.on_target_gain_changed)
 
+        self.render_plots_timer = QtCore.QTimer()
+        self.render_plots_timer.timeout.connect(self.render_plots)
 
         self.state = state.STOPPED
         self.update_widget_state()
 
-        self.AI_task = None
-        self.AI_read_array = None
-        self.AI_tasklock = threading.RLock()
+        self.AI_monitoring_task = None
+        self.CI_monitoring_task = None
+        self.monitoring_thread = None
 
         self.AO_beam_blanker_task = None
-        self.CI_task = None
+        self.CI_scanning_task = None
         self.AO_scanning_task = None
 
         self.load_config()
         self.ui.show()
 
-    def start_AI_task(self, target_current=True):
-        """Start tha analog input task for monitoring faraday cup and target current. If
+    def start_monitoring_tasks(self, target_current=True, CEM_counts=True):
+        """Start the analog input task for monitoring faraday cup and target current. If
         target_current is False, do not include it in the task - this is the case when
         we are instead measuring the target current in a scan"""
 
-        # Set up a task that acquires data with a callback every self.MAX_READ_PTS
-        # points or self.MAX_READ_INTERVAL seconds, whichever is faster. NI DAQmx calls
-        # callbacks in a separate thread, so this method returns, but data acquisition
-        # continues in the thread.
-
-        assert self.AI_task is None
-        self.AI_task = Task()
-
         # Acquisition rate in samples per second:
         rate = self.ui.spinBoxSampleRate.value()
+        # Get data MAX_READ_PTS points at a time or once every MAX_READ_INTERVAL
+        # seconds, whichever is faster:
+        num_samples = min(self.MAX_READ_PTS, int(rate * self.MAX_READ_INTERVAL))
+        # At least one point:
+        num_samples = max(1, num_samples)
 
-        chans = [self.ui.lineEditFaradayCup.text()]
+        # AI:
+        assert self.AI_monitoring_task is None
+        self.AI_monitoring_task = Task()
+
+        AI_chans = [self.ui.lineEditFaradayCup.text()]
         if target_current:
-            chans.append(self.ui.lineEditTarget.text())
+            AI_chans.append(self.ui.lineEditTarget.text())
 
-
-        for chan in chans:
-            self.AI_task.CreateAIVoltageChan(
+        for chan in AI_chans:
+            self.AI_monitoring_task.CreateAIVoltageChan(
                 chan,
                 "",
                 DAQmx_Val_RSE,
@@ -160,103 +181,146 @@ class App:
                 None,
             )
 
-        self.AI_task.CfgSampClkTiming(
-            "", rate, DAQmx_Val_Rising, DAQmx_Val_ContSamps, int(rate)
+        self.AI_monitoring_task.CfgSampClkTiming(
+            "", rate, DAQmx_Val_Rising, DAQmx_Val_ContSamps, num_samples
         )
 
-        bufsize = uInt32()
-        DAQmxGetBufInputBufSize(self.AI_task.taskHandle, bufsize)
-        bufsize = bufsize.value
-
-        # This must not be garbage collected until the task is:
-        self.AI_task.callback_ptr = DAQmxEveryNSamplesEventCallbackPtr(self.read_AI)
-
-        # Get data MAX_READ_PTS points at a time or once every MAX_READ_INTERVAL
-        # seconds, whichever is faster:
-        num_samples = min(self.MAX_READ_PTS, int(rate * self.MAX_READ_INTERVAL))
-        # Round to a multiple of two:
-        num_samples = 2 * (num_samples // 2)
-        self.AI_read_array = np.zeros((num_samples, len(chans)), dtype=np.float64)
-
-        self.AI_task.RegisterEveryNSamplesEvent(
-            DAQmx_Val_Acquired_Into_Buffer,
-            num_samples,
-            0,
-            self.AI_task.callback_ptr,
-            100,
+        # Get sample clock term of the AI task:
+        BUFSIZE = 4096
+        ai_sample_clock = ctypes.create_string_buffer(BUFSIZE)
+        DAQmxGetSampClkTerm(
+            self.AI_monitoring_task.taskHandle.value, ai_sample_clock, uInt32(BUFSIZE)
         )
-        self.AI_task.StartTask()
+        ai_sample_clock = ai_sample_clock.value.decode('utf8')
 
-    def read_AI(self, task_handle, event_type, num_samples, callback_data=None):
-        """Called as a callback by DAQmx while task is running. Also called by us to get
-        remaining data just prior to stopping the task. Since the callback runs
-        in a separate thread, we need to serialise access to instance variables"""
-        samples_read = int32()
-        with self.AI_tasklock:
-            if self.AI_task is None or task_handle != self.AI_task.taskHandle.value:
-                # Task stopped already.
-                return 0
-            self.AI_task.ReadAnalogF64(
-                num_samples,
-                -1,
-                DAQmx_Val_GroupByScanNumber,
-                self.AI_read_array,
-                self.AI_read_array.size,
-                samples_read,
-                None,
+        # CI task, if required:
+        assert self.CI_monitoring_task is None
+        if CEM_counts:
+            self.CI_monitoring_task = Task()
+            self.CI_monitoring_task.CreateCICountEdgesChan(
+                self.ui.lineEditCEM.text(),
+                "",
+                DAQmx_Val_Rising,
+                0,
+                DAQmx_Val_CountUp,
             )
-            # Select only the data read:
-            data = self.AI_read_array[: int(samples_read.value), :]
-            self.fc_data.add_data(data[:, 0] / self.fc_gain)
-            if data.shape[1] > 1:
-                self.target_data.add_data(data[:, 1] / self.target_gain)
-            self.update_plots()
-        return 0
+            self.CI_monitoring_task.CfgSampClkTiming(
+                ai_sample_clock,
+                rate,
+                DAQmx_Val_Rising,
+                DAQmx_Val_ContSamps,
+                num_samples,
+            )
 
-    @inmain_decorator(wait_for_return=False)
-    def update_plots(self):
-        self.target_curve.setData(self.target_data.data)
-        self.ui.labelTargetCurrent.setText(
-            pg.functions.siFormat(self.target_data.data[-1], precision=5, suffix='A')
-        )
 
-        self.fc_curve.setData(self.fc_data.data)
-        self.ui.labelFaradayCupCurrent.setText(
-            pg.functions.siFormat(self.fc_data.data[-1], precision=4, suffix='A')
-        )
+        # Start tasks and read thread:
+        self.AI_monitoring_task.StartTask()
+        if CEM_counts:
+            self.CI_monitoring_task.StartTask()
 
-        self.cem_curve.setData(self.cem_data.data)
-        self.ui.labelCEMCounts.setText(
-            pg.functions.siFormat(self.cem_data.data[-1], precision=5, suffix='counts s⁻¹')
+        self.monitoring_thread = threading.Thread(
+            target=self.read_monitoring, args=(num_samples, len(AI_chans)), daemon=True
         )
+        self.monitoring_thread.start()
+
+    def read_monitoring(self, num_samples, num_AI_chans):
+        """Read AI for monitoring in a loop. Runs in a separate thread until stopped"""
+        AI_read_array = np.zeros((num_samples, num_AI_chans), dtype=np.float64)
+        CI_read_array = np.zeros(num_samples, dtype=np.uint32)
+
+        samples_read = int32()
+        while True:
+            try:
+                self.AI_monitoring_task.ReadAnalogF64(
+                    num_samples,
+                    -1,
+                    DAQmx_Val_GroupByScanNumber,
+                    AI_read_array,
+                    AI_read_array.size,
+                    samples_read,
+                    None,
+                )
+                # Select only the data read:
+                data = AI_read_array[: int(samples_read.value), :]
+                self.fc_data_queue.put(data[:, 0] / self.fc_gain)
+                if data.shape[1] > 1:
+                    self.target_data_queue.put(data[:, 1] / self.target_gain)
+
+                if self.CI_monitoring_task is not None:
+                    self.CI_monitoring_task.ReadCounterU32(
+                        num_samples,
+                        -1,
+                        CI_read_array,
+                        CI_read_array.size,
+                        samples_read,
+                        None,
+                    )
+                    data = CI_read_array[: int(samples_read.value)]
+                    self.cem_data_queue.put(data[:] / self.cem_binwidth)
+
+            except InvalidTaskError:
+                # Task cleared by the main thread - we are being stopped.
+                break
+            
+    def stop_monitoring_tasks(self):
+        self.AI_monitoring_task.ClearTask()
+        if self.CI_monitoring_task is not None:
+            self.CI_monitoring_task.ClearTask()
+        self.monitoring_thread.join()
+        self.monitoring_thread = None
+        self.AI_monitoring_task = None
+        self.CI_monitoring_task = None
+
+    def render_plots(self):
+        target_data_chunks = queue_getall(self.target_data_queue)
+        if target_data_chunks:
+            self.target_data.add_data(np.concatenate(target_data_chunks))
+            self.target_curve.setData(self.target_data.data)
+            self.ui.labelTargetCurrent.setText(
+                pg.functions.siFormat(
+                    self.target_data.data[-1], precision=5, suffix='A'
+                )
+            )
+
+        fc_data_chunks =  queue_getall(self.fc_data_queue)
+        if fc_data_chunks:
+            self.fc_data.add_data(np.concatenate(fc_data_chunks))
+            self.fc_curve.setData(self.fc_data.data)
+            self.ui.labelFaradayCupCurrent.setText(
+                pg.functions.siFormat(self.fc_data.data[-1], precision=5, suffix='A')
+            )
+
+        cem_data_chunks = queue_getall(self.cem_data_queue)
+        if cem_data_chunks:
+            self.cem_data.add_data(np.concatenate(cem_data_chunks))
+            self.cem_curve.setData(self.cem_data.data)
+            self.ui.labelCEMCounts.setText(
+                pg.functions.siFormat(
+                    self.cem_data.data[-1], precision=5, suffix='counts s⁻¹'
+                )
+            )
 
     def start(self):
         # Transition from STOPPED to RUNNING
         assert self.state is state.STOPPED
-        
-        self.start_AI_task()
-        # create and start CI monitoring task and associated thread
-        # Create and start AI monitoring task and associated thread
+        self.start_monitoring_tasks()
         # Create and start Beam blanker AO task
-
-
+        self.render_plots_timer.start(int(1000 * self.MAX_READ_INTERVAL))
         self.state = state.RUNNING
         self.update_widget_state()
-        
 
     def stop(self):
         # Transition from RUNNING or SCANNING to STOPPED
         assert self.state in [state.RUNNING, state.SCANNING]
         if self.state is state.SCANNING:
             self.stop_scan()
+        self.stop_monitoring_tasks()
+        # Stop the rendering timer and call the render function one last time to render
+        # remaining data:
+        self.render_plots_timer.stop()
+        self.render_plots()
 
-        with self.AI_tasklock:
-            self.AI_task.StopTask()
-            self.AI_task.ClearTask()
-            self.AI_task = None
-            self.AI_read_array = None
         # TODO:
-        # - Stop CI, AI monitoring tasks and threads, set labels to read "–".
         # - Disable beam blanker (ensure button is disabled) and then stop beam blanker
         #   task.
 
@@ -266,14 +330,21 @@ class App:
     def start_scan(self):
         # Transition from RUNNING to SCANNING:
         assert self.state is state.RUNNING
-
+        # Stop monitoring tasks and restart without the channel we're measuring as part
+        # of the scan:
+        self.stop_monitoring_tasks()
+        acquire_type = self.ui.comboBoxAcquire.currentText()
+        self.start_monitoring_tasks(
+            target_current=(acquire_type == "CEM counts"),
+            CEM_counts=(acquire_type == "Target current"),
+        )
         # TODO:
         # - if CEM counts:
         #   - Stop CI monitoring task
         #   - Setup AO and CI tasks and threads, start them
         # - if Target current:
         #   - Stop AI monitoring task and restart with only FC
-        #   - Setup AO and AI tasks and threads, start them 
+        #   - Setup AO and AI tasks and threads, start them
 
         self.state = state.SCANNING
         self.update_widget_state()
@@ -281,6 +352,10 @@ class App:
     def stop_scan(self):
         # Transition from SCANNING to RUNNING
         assert self.state is state.SCANNING
+        # Restart monitoring tasks to include channel that was being acquired in the
+        # scan:
+        self.stop_monitoring_tasks()
+        self.start_monitoring_tasks()
 
         # TODO:
         # - Stop tasks if they're not already stopped - figure this out when writing
@@ -354,7 +429,7 @@ class App:
         self.ui.spinBoxNy.setValue(config['scanning']['ny'])
         self.ui.doubleSpinBoxXcal.setValue(config['scanning']['xcal'])
         self.ui.doubleSpinBoxYcal.setValue(config['scanning']['ycal'])
-        self.ui.comboBoxAcquire.setCurrentIndex(config['scanning']['acquire'])
+        self.ui.comboBoxAcquire.setCurrentText(config['scanning']['acquire'])
 
         self.ui.doubleSpinBoxBeamBlankerVoltage.setValue(
             config['beam_blanker']['voltage']
@@ -384,7 +459,7 @@ class App:
                 'ny': self.ui.spinBoxNy.value(),
                 'xcal': self.ui.doubleSpinBoxXcal.value(),
                 'ycal': self.ui.doubleSpinBoxYcal.value(),
-                'acquire': self.ui.comboBoxAcquire.currentIndex(),
+                'acquire': self.ui.comboBoxAcquire.currentText(),
             },
             'beam_blanker': {
                 'voltage': self.ui.doubleSpinBoxBeamBlankerVoltage.value()

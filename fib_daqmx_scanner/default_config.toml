@@ -8,7 +8,7 @@
     ny = 256
     xcal = 60
     ycal = 60
-    acquire = 0
+    acquire = "CEM counts"
 
 [beam_blanker]
     voltage = 90
