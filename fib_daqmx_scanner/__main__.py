@@ -104,6 +104,7 @@ class App:
         self.ui = loader.load(Path(SOURCE_DIR, 'main.ui'))
         self.image_view = pg.ImageView()
         self.image = np.zeros((1, 1), dtype=int)
+        self.image_rendering_required = threading.Event()
         self.image_view.setSizePolicy(
             QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding
         )
@@ -300,6 +301,7 @@ class App:
             # Blank the image if the dtype or shape has changed:
             if (self.image.dtype, self.image.shape) != (image_dtype, (nx, ny)):
                 self.image = np.zeros((nx, ny), dtype=image_dtype)
+                self.image[:, :] = np.nan
 
             # Start the scanning AO task:
             self.setup_AO_task(nx, ny, rate)
@@ -418,13 +420,15 @@ class App:
                         self.image.ravel()[start_ix:end_ix] += image_data
                     else:
                         self.image.ravel()[start_ix:end_ix] = image_data
+                    # Signal to the rendering method that it should render the image:
+                    self.image_rendering_required.set()
 
         except InvalidTaskError:
             # Task cleared by the main thread - we are being stopped.
             return
 
     def stop_tasks(self):
-        """Clear all tasks and stop the acquisition thread, if running. This mthod is
+        """Clear all tasks and stop the acquisition thread, if running. This method is
         idempotent can be run even if tasks are parttially initialised, thus it can be
         used to recover from a failure to start tasks correctly"""
         if self.AI_task is not None:
@@ -469,7 +473,8 @@ class App:
                 )
             )
 
-        if self.state is State.SCANNING:
+        if self.image_rendering_required.is_set():
+            self.image_rendering_required.clear()
             autoscale = self.ui.toolButtonAutoScaleImage.isChecked()
             self.image_view.setImage(
                 self.image.swapaxes(-1, -2),
