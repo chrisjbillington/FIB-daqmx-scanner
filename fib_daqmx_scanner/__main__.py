@@ -433,8 +433,9 @@ class App:
             self.AO_task.ClearTask()
         if self.CI_task is not None:
             self.CI_task.ClearTask()
-        if self.acquisition_thread is not None:
+        if self.acquisition_thread is not None and self.acquisition_thread.is_alive():
             self.acquisition_thread.join()
+        self.acquisition_thread = None
         self.AI_task = None
         self.AO_task = None
         self.CI_task = None
