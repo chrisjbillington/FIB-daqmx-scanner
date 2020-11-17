@@ -18,23 +18,49 @@
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
       <widget class="QToolButton" name="toolButtonStart">
+       <property name="toolTip">
+        <string>Start monitoring</string>
+       </property>
        <property name="text">
         <string>...</string>
        </property>
        <property name="icon">
-        <iconset>
+        <iconset resource="../../qtutils/icons/icons.qrc">
          <normaloff>:/qtutils/fugue/control.png</normaloff>:/qtutils/fugue/control.png</iconset>
        </property>
       </widget>
      </item>
      <item>
       <widget class="QToolButton" name="toolButtonStop">
+       <property name="toolTip">
+        <string>Stop monitoring</string>
+       </property>
        <property name="text">
         <string>...</string>
        </property>
        <property name="icon">
-        <iconset>
+        <iconset resource="../../qtutils/icons/icons.qrc">
          <normaloff>:/qtutils/fugue/control-stop-square.png</normaloff>:/qtutils/fugue/control-stop-square.png</iconset>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QToolButton" name="toolButtonAutoScaleImage">
+       <property name="toolTip">
+        <string>Autoscale image</string>
+       </property>
+       <property name="text">
+        <string>...</string>
+       </property>
+       <property name="icon">
+        <iconset resource="../../qtutils/icons/icons.qrc">
+         <normaloff>:/qtutils/fugue/image-resize.png</normaloff>:/qtutils/fugue/image-resize.png</iconset>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+       <property name="checked">
+        <bool>false</bool>
        </property>
       </widget>
      </item>
@@ -116,7 +142,7 @@
                   <string>Start</string>
                  </property>
                  <property name="icon">
-                  <iconset>
+                  <iconset resource="../../qtutils/icons/icons.qrc">
                    <normaloff>:/qtutils/fugue/control.png</normaloff>:/qtutils/fugue/control.png</iconset>
                  </property>
                 </widget>
@@ -127,7 +153,7 @@
                   <string>Stop</string>
                  </property>
                  <property name="icon">
-                  <iconset>
+                  <iconset resource="../../qtutils/icons/icons.qrc">
                    <normaloff>:/qtutils/fugue/control-stop-square.png</normaloff>:/qtutils/fugue/control-stop-square.png</iconset>
                  </property>
                 </widget>
@@ -138,7 +164,7 @@
                   <string>Repeat</string>
                  </property>
                  <property name="icon">
-                  <iconset>
+                  <iconset resource="../../qtutils/icons/icons.qrc">
                    <normaloff>:/qtutils/fugue/arrow-repeat.png</normaloff>:/qtutils/fugue/arrow-repeat.png</iconset>
                  </property>
                  <property name="checkable">
@@ -147,13 +173,13 @@
                 </widget>
                </item>
                <item>
-                <widget class="QPushButton" name="pushButtonClear">
+                <widget class="QPushButton" name="pushButtonAccumulate">
                  <property name="text">
-                  <string>Clear</string>
+                  <string>Accumulate</string>
                  </property>
                  <property name="icon">
-                  <iconset>
-                   <normaloff>:/qtutils/fugue/eraser.png</normaloff>:/qtutils/fugue/eraser.png</iconset>
+                  <iconset resource="../../qtutils/icons/icons.qrc">
+                   <normaloff>:/qtutils/fugue/sum.png</normaloff>:/qtutils/fugue/sum.png</iconset>
                  </property>
                  <property name="checkable">
                   <bool>true</bool>
@@ -437,7 +463,7 @@
                 <string>Enable</string>
                </property>
                <property name="icon">
-                <iconset>
+                <iconset resource="../../qtutils/icons/icons.qrc">
                  <normaloff>:/qtutils/fugue/traffic-light-red.png</normaloff>:/qtutils/fugue/traffic-light-red.png</iconset>
                </property>
                <property name="checkable">
@@ -806,7 +832,7 @@
   <tabstop>pushButtonStartScan</tabstop>
   <tabstop>pushButtonStopScan</tabstop>
   <tabstop>pushButtonRepeat</tabstop>
-  <tabstop>pushButtonClear</tabstop>
+  <tabstop>pushButtonAccumulate</tabstop>
   <tabstop>doubleSpinBoxXmin</tabstop>
   <tabstop>doubleSpinBoxXmax</tabstop>
   <tabstop>doubleSpinBoxYmin</tabstop>
@@ -830,6 +856,8 @@
   <tabstop>spinBoxFaradayCupGain</tabstop>
   <tabstop>spinBoxTargetGain</tabstop>
  </tabstops>
- <resources/>
+ <resources>
+  <include location="../../qtutils/icons/icons.qrc"/>
+ </resources>
  <connections/>
 </ui>

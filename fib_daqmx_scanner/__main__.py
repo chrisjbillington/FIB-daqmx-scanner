@@ -11,7 +11,7 @@ import appdirs
 import toml
 import numpy as np
 from qtutils.qt import QtCore, QtGui, QtWidgets
-from qtutils import inmain, inmain_decorator, UiLoader
+from qtutils import inmain, inmain_later, inmain_decorator, UiLoader
 import qtutils.icons
 import pyqtgraph as pg
 
@@ -20,6 +20,7 @@ from PyDAQmx.DAQmxFunctions import (
     SamplesNotYetAvailableError,
     InvalidTaskError,
     DAQmxGetSampClkTerm,
+    DAQmxGetReadCurrReadPos
 )
 from PyDAQmx.DAQmxConstants import (
     DAQmx_Val_RSE,
@@ -32,8 +33,7 @@ from PyDAQmx.DAQmxConstants import (
     DAQmx_Val_CountUp,
 )
 
-from PyDAQmx.DAQmxTypes import DAQmxEveryNSamplesEventCallbackPtr, int32, uInt32
-# from PyDAQmx.DAQmxCallBack import 
+from PyDAQmx.DAQmxTypes import int32, uInt32, uInt64
 
 SOURCE_DIR = Path(__file__).absolute().parent
 CONFIG_FILE = Path(appdirs.user_config_dir(), 'fib-daqmx-scanner', 'config.toml')
@@ -71,12 +71,21 @@ def queue_getall(queue):
         except Empty:
             return items
 
+
 def get_sample_clock_term(task):
     """Return the string name of the sample clock terminal for a task"""
     BUFSIZE = 4096
     buff = ctypes.create_string_buffer(BUFSIZE)
     DAQmxGetSampClkTerm(task.taskHandle.value, buff, uInt32(BUFSIZE))
     return buff.value.decode('utf8')
+
+
+def get_read_pos(task):
+    """Return index of the next sample to be read in a finite acquisition task"""
+    read_pos = uInt64()
+    DAQmxGetReadCurrReadPos(task.taskHandle.value, read_pos)
+    return read_pos.value
+
 
 class state(IntEnum):
     STOPPED = 0
@@ -92,6 +101,7 @@ class App:
         self.ui = loader = UiLoader()
         self.ui = loader.load(Path(SOURCE_DIR, 'main.ui'))
         self.image = pg.ImageView()
+        self.image_data = np.zeros((1, 1), dtype=int)
         self.image.setSizePolicy(
             QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding
         )
@@ -152,15 +162,18 @@ class App:
 
         self.AO_beam_blanker_task = None
         self.CI_scanning_task = None
+        self.AI_scanning_task = None
         self.AO_scanning_task = None
+        self.scanning_thread = None
 
         self.load_config()
         self.ui.show()
 
-    def start_monitoring_tasks(self, target_current=True, CEM_counts=True):
-        """Start the analog input task for monitoring faraday cup and target current. If
-        target_current is False, do not include it in the task - this is the case when
-        we are instead measuring the target current in a scan"""
+    def start_monitoring_tasks(self, currents=True, CEM_counts=True):
+        """Start the AI task for monitoring faraday cup and target current and CI task
+        for monitoring CEM counts:"""
+
+        assert currents or CEM_counts
 
         # Acquisition rate in samples per second:
         rate = self.ui.spinBoxSampleRate.value()
@@ -170,31 +183,32 @@ class App:
         # At least two points:
         num_samples = max(2, num_samples)
 
-        # AI:
+        # AI task, if required:
         assert self.AI_monitoring_task is None
-        self.AI_monitoring_task = Task()
-
-        AI_chans = [self.ui.lineEditFaradayCup.text()]
-        if target_current:
-            AI_chans.append(self.ui.lineEditTarget.text())
-
-        self.AI_monitoring_task.CreateAIVoltageChan(
-            ', '.join(AI_chans),
-            "",
-            DAQmx_Val_RSE,
-            -10,
-            10,
-            DAQmx_Val_Volts,
-            None,
-        )
-
-        self.AI_monitoring_task.CfgSampClkTiming(
-            "", rate, DAQmx_Val_Rising, DAQmx_Val_ContSamps, num_samples
-        )
+        if currents:
+            assert self.AI_scanning_task is None
+            self.AI_monitoring_task = Task()
+            AI_chans = [
+                self.ui.lineEditFaradayCup.text(),
+                self.ui.lineEditTarget.text(),
+            ]
+            self.AI_monitoring_task.CreateAIVoltageChan(
+                ', '.join(AI_chans),
+                "",
+                DAQmx_Val_RSE,
+                -10,
+                10,
+                DAQmx_Val_Volts,
+                None,
+            )
+            self.AI_monitoring_task.CfgSampClkTiming(
+                "", rate, DAQmx_Val_Rising, DAQmx_Val_ContSamps, num_samples
+            )
 
         # CI task, if required:
         assert self.CI_monitoring_task is None
         if CEM_counts:
+            assert self.CI_scanning_task is None
             self.CI_monitoring_task = Task()
             self.CI_monitoring_task.CreateCICountEdgesChan(
                 self.ui.lineEditCEM.text(),
@@ -213,37 +227,38 @@ class App:
             )
 
         # Start tasks and read thread:
-        self.AI_monitoring_task.StartTask()
+        if currents:
+            self.AI_monitoring_task.StartTask()
         if CEM_counts:
             self.CI_monitoring_task.StartTask()
 
         self.monitoring_thread = threading.Thread(
-            target=self.read_monitoring, args=(num_samples, len(AI_chans)), daemon=True
+            target=self.read_monitoring, args=(num_samples,), daemon=True
         )
         self.monitoring_thread.start()
 
-    def read_monitoring(self, num_samples, num_AI_chans):
+    def read_monitoring(self, num_samples):
         """Read AI for monitoring in a loop. Runs in a separate thread until stopped"""
-        AI_read_array = np.zeros((num_samples, num_AI_chans), dtype=np.float64)
+        AI_read_array = np.zeros((num_samples, 2), dtype=np.float64)
         CI_read_array = np.zeros(num_samples, dtype=np.uint32)
 
         samples_read = int32()
         last_counter_value = None
-        while True:
-            try:
-                self.AI_monitoring_task.ReadAnalogF64(
-                    num_samples,
-                    -1,
-                    DAQmx_Val_GroupByScanNumber,
-                    AI_read_array,
-                    AI_read_array.size,
-                    samples_read,
-                    None,
-                )
-                # Select only the data read:
-                data = AI_read_array[: int(samples_read.value), :]
-                self.fc_data_queue.put(data[:, 0] / self.fc_gain)
-                if data.shape[1] > 1:
+        try:
+            while True:
+                if self.AI_monitoring_task is not None:
+                    self.AI_monitoring_task.ReadAnalogF64(
+                        num_samples,
+                        -1,
+                        DAQmx_Val_GroupByScanNumber,
+                        AI_read_array,
+                        AI_read_array.size,
+                        samples_read,
+                        None,
+                    )
+                    # Select only the data read:
+                    data = AI_read_array[: int(samples_read.value), :]
+                    self.fc_data_queue.put(data[:, 0] / self.fc_gain)
                     self.target_data_queue.put(data[:, 1] / self.target_gain)
 
                 if self.CI_monitoring_task is not None:
@@ -267,12 +282,12 @@ class App:
                         diffs[0] = diffs[1]
                     else:
                         diffs = np.diff(data, prepend=last_counter_value)
-                        last_counter_value = data[-1]
+                    last_counter_value = data[-1]
                     self.cem_data_queue.put(diffs / self.cem_binwidth)
 
-            except InvalidTaskError:
-                # Task cleared by the main thread - we are being stopped.
-                break
+        except InvalidTaskError:
+            # Task cleared by the main thread - we are being stopped.
+            return
             
     def stop_monitoring_tasks(self):
         self.AI_monitoring_task.ClearTask()
@@ -283,7 +298,7 @@ class App:
         self.AI_monitoring_task = None
         self.CI_monitoring_task = None
 
-    def start_scanning_tasks(self):
+    def start_scanning_tasks(self, acquire_type="CEM counts"):
         nx = self.ui.spinBoxNx.value()
         ny = self.ui.spinBoxNy.value()
         xmin = self.ui.doubleSpinBoxXmin.value()
@@ -302,7 +317,8 @@ class App:
         # point.
         Vx = np.append(Vx.flatten(), [0])
         Vy = np.append(Vy.flatten(), [0])
-        rate = 1e6 / self.ui.spinBoxDwellTime.value()
+        dwell_time = self.ui.spinBoxDwellTime.value() * 1e-6
+        rate = 1 / dwell_time
 
         assert self.AO_scanning_task is None
         self.AO_scanning_task = Task()
@@ -334,54 +350,169 @@ class App:
             None,
         )
 
+        # Get data MAX_READ_PTS points at a time or once every MAX_READ_INTERVAL
+        # seconds, whichever is faster:
+        num_samples = min(self.MAX_READ_PTS, int(rate * self.MAX_READ_INTERVAL))
+        # At least two points:
+        num_samples = max(2, num_samples)
+
+        if acquire_type == "CEM counts":
+            image_dtype = int
+            # CI task, if required:
+            assert self.CI_scanning_task is None
+            assert self.CI_monitoring_task is None
+
+            self.CI_scanning_task = Task()
+            self.CI_scanning_task.CreateCICountEdgesChan(
+                self.ui.lineEditCEM.text(),
+                "",
+                DAQmx_Val_Rising,
+                0,
+                DAQmx_Val_CountUp,
+            )
+            # Sample clock synced to AI task:
+            self.CI_scanning_task.CfgSampClkTiming(
+                get_sample_clock_term(self.AO_scanning_task),
+                rate,
+                DAQmx_Val_Rising,
+                DAQmx_Val_FiniteSamps,
+                nx * ny + 1,
+            )
+
+            self.CI_scanning_task.StartTask()
+
+        elif acquire_type == "Target current":
+            image_dtype = float
+            # CI task, if required:
+            assert self.AI_scanning_task is None
+            assert self.AI_monitoring_task is None
+
+            self.AI_scanning_task = Task()
+            AI_chans = [
+                self.ui.lineEditFaradayCup.text(),
+                self.ui.lineEditTarget.text(),
+            ]
+            self.AI_scanning_task.CreateAIVoltageChan(
+                ', '.join(AI_chans),
+                "",
+                DAQmx_Val_RSE,
+                -10,
+                10,
+                DAQmx_Val_Volts,
+                None,
+            )
+
+            # Sample clock synced to AI task:
+            self.AI_scanning_task.CfgSampClkTiming(
+                get_sample_clock_term(self.AO_scanning_task),
+                rate,
+                DAQmx_Val_Rising,
+                DAQmx_Val_FiniteSamps,
+                nx * ny + 1,
+            )
+
+            self.AI_scanning_task.StartTask()
+
+        else:
+            raise ValueError(acquire_type)
+
+        # Blank the image if the dtype or shape has changed:
+        if self.image_data.dtype != image_dtype or self.image_data.shape != (nx, ny):
+            self.image_data = np.zeros((nx, ny), dtype=image_dtype)
+
+        accumulate = self.ui.pushButtonAccumulate.isChecked()
+
+        self.scanning_thread = threading.Thread(
+            target=self.read_scanning,
+            args=(num_samples, nx, ny, accumulate, dwell_time),
+            daemon=True,
+        )
+        self.scanning_thread.start()
+
         # Go!
         self.AO_scanning_task.StartTask()
 
+    def read_scanning(self, num_samples, nx, ny, accumulate, dwell_time):
 
-        # # CI task, if required:
-        # assert self.CI_monitoring_task is None
+        AI_read_array = np.zeros((num_samples, 2), dtype=np.float64)
+        CI_read_array = np.zeros(num_samples, dtype=np.uint32)
 
-        # # Get data MAX_READ_PTS points at a time or once every MAX_READ_INTERVAL
-        # # seconds, whichever is faster:
-        # num_samples = min(self.MAX_READ_PTS, int(rate * self.MAX_READ_INTERVAL))
-        # # At least two points:
-        # num_samples = max(2, num_samples)
+        total_samples= nx * ny + 1
+        samples_read = int32()
+        last_counter_value = None
+        try:
+            while True:
+                read_pos = get_read_pos(self.AI_scanning_task or self.CI_scanning_task)
+                samples_to_acquire = min(num_samples, total_samples - read_pos)
+                if read_pos == total_samples:
+                    inmain_later(self.end_scan)
+                    return
+                if self.CI_scanning_task is not None:
+                    self.CI_scanning_task.ReadCounterU32(
+                            samples_to_acquire,
+                            -1,
+                            CI_read_array,
+                            CI_read_array.size,
+                            samples_read,
+                            None,
+                        )
+                    data = CI_read_array[: int(samples_read.value)]
+                    data = np.random.randint(
+                        0, 1000, size=len(data), dtype=np.uint32
+                    )  # FAKE_DATA
+                    # Compute differences in counter values. We are ignoring the first
+                    # sample as it represents the counter value at the time the task
+                    # started, whereas the first point we're interested in is one
+                    # dwell-time later.
+                    if last_counter_value is None:
+                        # First datapoint after starting the task is bogus, duplicate
+                        # the second point instead
+                        diffs = np.diff(data, prepend=0)
+                        diffs[0] = diffs[1]
+                    else:
+                        diffs = np.diff(data, prepend=last_counter_value)
+                    last_counter_value = data[-1]
+                    self.cem_data_queue.put(diffs / dwell_time)
+                    new_image_data = diffs
+                elif self.AI_scanning_task is not None:
+                    self.task.ReadAnalogF64(
+                        samples_to_acquire,
+                        -1,
+                        DAQmx_Val_GroupByScanNumber,
+                        AI_read_array,
+                        AI_read_array.size,
+                        samples_read,
+                        None,
+                    )
+                    data = AI_read_array[: int(samples_read.value), :]
+                    self.fc_data_queue.put(data[:, 0] / self.fc_gain)
+                    self.target_data_queue.put(data[:, 1] / self.target_gain)
+                    new_image_data = data[:, 1] / self.target_gain
 
-        # if CEM_counts:
-        #     self.CI_monitoring_task = Task()
-        #     self.CI_monitoring_task.CreateCICountEdgesChan(
-        #         self.ui.lineEditCEM.text(),
-        #         "",
-        #         DAQmx_Val_Rising,
-        #         0,
-        #         DAQmx_Val_CountUp,
-        #     )
-        #     # Sample clock synced to AI task:
-        #     self.CI_monitoring_task.CfgSampClkTiming(
-        #         get_sample_clock_term(self.AI_monitoring_task),
-        #         rate,
-        #         DAQmx_Val_Rising,
-        #         DAQmx_Val_ContSamps,
-        #         num_samples,
-        #     )
+                # Ignore first point:
+                if read_pos == 0:
+                    new_image_data = new_image_data[1:]
+                start_ix = max(read_pos-1, 0)
+                end_ix = start_ix + len(new_image_data)
+                if accumulate:
+                    self.image_data.ravel()[start_ix:end_ix] += new_image_data
+                else:
+                    self.image_data.ravel()[start_ix:end_ix] = new_image_data
 
-        # # Start tasks and read thread:
-        # self.AI_monitoring_task.StartTask()
-        # if CEM_counts:
-        #     self.CI_monitoring_task.StartTask()
-
-        # self.monitoring_thread = threading.Thread(
-        #     target=self.read_monitoring, args=(num_samples, len(AI_chans)), daemon=True
-        # )
-        # self.monitoring_thread.start()
-
-
-    def read_scanning(self):
-        pass
+        except InvalidTaskError:
+            # Task cleared by the main thread - we are being stopped.
+            return
 
     def stop_scanning_tasks(self):
         self.AO_scanning_task.ClearTask()
+        if self.CI_scanning_task is not None:
+            self.CI_scanning_task.ClearTask()
+        if self.AI_scanning_task is not None:
+            self.AI_scanning_task.ClearTask()
+        self.scanning_thread.join()
         self.AO_scanning_task = None
+        self.CI_scanning_task = None
+        self.AI_scanning_task = None
 
     def render_plots(self):
         target_data_chunks = queue_getall(self.target_data_queue)
@@ -411,6 +542,14 @@ class App:
                     self.cem_data.data[-1], precision=5, suffix='counts s⁻¹'
                 )
             )
+
+        autoscale = self.ui.toolButtonAutoScaleImage.isChecked()
+        self.image.setImage(
+            self.image_data.swapaxes(-1, -2),
+            autoRange=autoscale,
+            autoLevels=autoscale,
+            autoHistogramRange=autoscale,
+        )
 
     def start(self):
         # Transition from STOPPED to RUNNING
@@ -447,36 +586,35 @@ class App:
         self.stop_monitoring_tasks()
         acquire_type = self.ui.comboBoxAcquire.currentText()
         self.start_monitoring_tasks(
-            target_current=(acquire_type == "CEM counts"),
+            currents=(acquire_type == "CEM counts"),
             CEM_counts=(acquire_type == "Target current"),
         )
-        self.start_scanning_tasks()
-
-        # TODO:
-        # - if CEM counts:
-        #   - Stop CI monitoring task
-        #   - Setup AO and CI tasks and threads, start them
-        # - if Target current:
-        #   - Stop AI monitoring task and restart with only FC
-        #   - Setup AO and AI tasks and threads, start them
+        self.start_scanning_tasks(acquire_type=acquire_type)
 
         self.state = state.SCANNING
         self.update_widget_state()
+
+    def end_scan(self):
+        """Run when a scan completes. Either stop or repeat scanning, depending on the
+        repeat button"""
+        assert self.state is state.SCANNING
+        if self.ui.pushButtonRepeat.isChecked():
+            self.stop_scanning_tasks()
+            acquire_type = self.ui.comboBoxAcquire.currentText()
+            self.start_scanning_tasks(acquire_type=acquire_type)
+        else:
+            self.stop_scan()
 
     def stop_scan(self):
         # Transition from SCANNING to RUNNING
         assert self.state is state.SCANNING
 
-        # TODO:
-        # - Stop AO and AI or CI scan tasks
         self.stop_scanning_tasks()
 
         # Restart monitoring tasks to include channel that was being acquired in the
         # scan:
         self.stop_monitoring_tasks()
         self.start_monitoring_tasks()
-
-        
 
         self.state = state.RUNNING
         self.update_widget_state()
@@ -533,6 +671,9 @@ class App:
             CONFIG_FILE.write_text(DEFAULT_CONFIG_FILE.read_text())
 
         config = toml.load(CONFIG_FILE)
+
+        self.ui.toolButtonAutoScaleImage.setChecked((config['misc']['autoscale_image']))
+
         self.ui.doubleSpinBoxXmin.setValue(config['scanning']['xmin'])
         self.ui.doubleSpinBoxXmax.setValue(config['scanning']['xmax'])
         self.ui.doubleSpinBoxYmin.setValue(config['scanning']['ymin'])
@@ -562,6 +703,7 @@ class App:
 
     def save_config(self):
         config = {
+            'misc': {'autoscale_image': self.ui.toolButtonAutoScaleImage.isChecked()},
             'scanning': {
                 'xmin': self.ui.doubleSpinBoxXmin.value(),
                 'xmax': self.ui.doubleSpinBoxXmax.value(),

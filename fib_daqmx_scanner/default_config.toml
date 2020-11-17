@@ -1,3 +1,6 @@
+[misc]
+    autoscale_image = true
+
 [scanning]
     xmin = -500
     xmax = 500
