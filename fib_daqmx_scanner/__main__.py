@@ -7,20 +7,19 @@ from queue import Queue, Empty
 import ctypes
 
 import appdirs
-
 import toml
 import numpy as np
 from qtutils.qt import QtCore, QtGui, QtWidgets
-from qtutils import inmain, inmain_later, inmain_decorator, UiLoader
+from qtutils import inmain_later, UiLoader
 import qtutils.icons
 import pyqtgraph as pg
 
 from PyDAQmx import Task
 from PyDAQmx.DAQmxFunctions import (
-    SamplesNotYetAvailableError,
     InvalidTaskError,
     DAQmxGetSampClkTerm,
-    DAQmxGetReadCurrReadPos
+    DAQmxGetReadCurrReadPos,
+    DAQError,
 )
 from PyDAQmx.DAQmxConstants import (
     DAQmx_Val_RSE,
@@ -186,7 +185,7 @@ class App:
         Vx = np.append(Vx.flatten(), [0])
         Vy = np.append(Vy.flatten(), [0])
     
-        self.AO_task = Task()
+        self.AO_task = Task("AO x-y scanning task")
 
         AO_chans = [self.ui.lineEditScanX.text(), self.ui.lineEditScanY.text()]
         self.AO_task.CreateAOVoltageChan(
@@ -220,7 +219,7 @@ class App:
         used to configure the task in finite sample mode with the sample clock synced to
         the AO task, otherwise npts_per_read should be the number of points that will be
         read per read in continuous sample mode"""
-        self.AI_task = Task()
+        self.AI_task = Task("Current acquisition task")
         chans = [
             self.ui.lineEditFaradayCup.text(),
             self.ui.lineEditTarget.text(),
@@ -250,7 +249,7 @@ class App:
             )
 
     def setup_CI_task(self, scanning, nx, ny, rate, npts_per_read):
-        self.CI_task = Task()
+        self.CI_task = Task("CEM counter task")
         self.CI_task.CreateCICountEdgesChan(
             self.ui.lineEditCEM.text(),
             "",
@@ -373,11 +372,11 @@ class App:
                     )
                 data = CI_read_array[: int(samples_read.value)]
                 
-                # FAKE DATA
-                data = np.random.randint(
-                    0, 1000, size=len(data), dtype=np.uint32
-                ).cumsum() + (last_counter_value or 0)
-                # END FAKE_DATA
+                # # replace with fake data for testing, since simulated DAQmx devices
+                # # return all zeros for counter input
+                # data = np.random.randint(
+                #     0, 1000, size=len(data), dtype=np.uint32
+                # ).cumsum() + (last_counter_value or 0)
 
                 # Compute differences in counter values.
                 if last_counter_value is None:
@@ -425,14 +424,20 @@ class App:
             return
 
     def stop_tasks(self):
-        self.AI_task.ClearTask()
-        self.CI_task.ClearTask()
+        """Clear all tasks and stop the acquisition thread, if running. This mthod is
+        idempotent can be run even if tasks are parttially initialised, thus it can be
+        used to recover from a failure to start tasks correctly"""
+        if self.AI_task is not None:
+            self.AI_task.ClearTask()
         if self.AO_task is not None:
             self.AO_task.ClearTask()
-        self.acquisition_thread.join()
-        self.CI_task = None
+        if self.CI_task is not None:
+            self.CI_task.ClearTask()
+        if self.acquisition_thread is not None:
+            self.acquisition_thread.join()
         self.AI_task = None
         self.AO_task = None
+        self.CI_task = None
 
     def render_plots(self):
         target_data_chunks = queue_getall(self.target_data_queue)
@@ -475,7 +480,19 @@ class App:
     def start(self):
         # Transition from STOPPED to RUNNING
         assert self.state is State.STOPPED
-        self.start_tasks(scanning=False)
+
+        try:
+            self.start_tasks(scanning=False)
+        except DAQError as e:
+            self.stop_tasks()
+            msg = QtWidgets.QMessageBox(self.ui)
+            msg.setIcon(QtWidgets.QMessageBox.Warning)
+            msg.setText("Could not start. See below error from DAQmx for details")
+            msg.setInformativeText(str(e))
+            msg.setWindowTitle("Could not start")
+            msg.show()
+            return
+
         # TODO: create and start Beam blanker AO task. Possible...?
         self.render_plots_timer.start(int(1000 * self.MAX_READ_INTERVAL))
         self.state = State.RUNNING
@@ -506,7 +523,18 @@ class App:
         # of the scan:
         self.stop_tasks()
         scan_type = ScanType(self.ui.comboBoxAcquire.currentIndex())
-        self.start_tasks(scanning=True, scan_type=scan_type)
+        try:
+            self.start_tasks(scanning=True, scan_type=scan_type)
+        except DAQError as e:
+            self.stop_tasks()
+            self.start_tasks(scanning=False)
+            msg = QtWidgets.QMessageBox(self.ui)
+            msg.setIcon(QtWidgets.QMessageBox.Warning)
+            msg.setText("Could not start scan. See below error from DAQmx for details")
+            msg.setInformativeText(str(e))
+            msg.setWindowTitle("Could not start scan")
+            msg.show()
+            return
         self.state = State.SCANNING
         self.update_widget_state()
 
