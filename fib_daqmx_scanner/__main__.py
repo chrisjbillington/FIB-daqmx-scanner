@@ -17,6 +17,7 @@ import pyqtgraph as pg
 from PyDAQmx import Task
 from PyDAQmx.DAQmxFunctions import (
     InvalidTaskError,
+    SamplesNotYetAvailableError,
     DAQmxGetSampClkTerm,
     DAQmxGetReadCurrReadPos,
     DAQError,
@@ -299,8 +300,8 @@ class App:
             else:
                 raise ValueError(scan_type)
             # Blank the image if the dtype or shape has changed:
-            if (self.image.dtype, self.image.shape) != (image_dtype, (nx, ny)):
-                self.image = np.zeros((nx, ny), dtype=image_dtype)
+            if (self.image.dtype, self.image.shape) != (image_dtype, (ny, nx)):
+                self.image = np.zeros((ny, nx), dtype=image_dtype)
                 self.image[:, :] = np.nan
 
             # Start the scanning AO task:
@@ -347,6 +348,8 @@ class App:
         AI_read_array = np.zeros((npts_per_read, 2), dtype=np.float64)
         CI_read_array = np.zeros(npts_per_read, dtype=np.uint32)
 
+        TIMEOUT = float(npts_per_read / rate)
+
         total_samples= nx * ny + 1
         samples_read = int32()
         last_counter_value = None
@@ -364,14 +367,20 @@ class App:
                 else:
                     samples_to_acquire = npts_per_read
                 
-                self.CI_task.ReadCounterU32(
-                        samples_to_acquire,
-                        -1,
-                        CI_read_array,
-                        CI_read_array.size,
-                        samples_read,
-                        None,
-                    )
+                while True:
+                    try:
+                        self.CI_task.ReadCounterU32(
+                                samples_to_acquire,
+                                TIMEOUT,
+                                CI_read_array,
+                                CI_read_array.size,
+                                samples_read,
+                                None,
+                            )
+                        break
+                    except SamplesNotYetAvailableError:
+                        continue
+
                 data = CI_read_array[: int(samples_read.value)]
                 
                 # # replace with fake data for testing, since simulated DAQmx devices
@@ -395,15 +404,22 @@ class App:
                 if scanning and scan_type is ScanType.CEM_COUNTS:
                     image_data = diffs
 
-                self.AI_task.ReadAnalogF64(
-                    samples_to_acquire,
-                    -1,
-                    DAQmx_Val_GroupByScanNumber,
-                    AI_read_array,
-                    AI_read_array.size,
-                    samples_read,
-                    None,
-                )
+
+                while True:
+                    try:
+                        self.AI_task.ReadAnalogF64(
+                            samples_to_acquire,
+                            TIMEOUT,
+                            DAQmx_Val_GroupByScanNumber,
+                            AI_read_array,
+                            AI_read_array.size,
+                            samples_read,
+                            None,
+                        )
+                        break
+                    except SamplesNotYetAvailableError:
+                        continue
+
                 data = AI_read_array[: int(samples_read.value), :]
                 self.fc_data_queue.put(data[:, 0] / self.fc_gain)
                 self.target_data_queue.put(data[:, 1] / self.target_gain)
@@ -426,6 +442,7 @@ class App:
         except InvalidTaskError:
             # Task cleared by the main thread - we are being stopped.
             return
+
 
     def stop_tasks(self):
         """Clear all tasks and stop the acquisition thread, if running. This method is
