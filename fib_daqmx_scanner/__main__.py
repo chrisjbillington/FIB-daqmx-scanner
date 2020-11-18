@@ -348,9 +348,13 @@ class App:
         AI_read_array = np.zeros((npts_per_read, 2), dtype=np.float64)
         CI_read_array = np.zeros(npts_per_read, dtype=np.uint32)
 
-        TIMEOUT = float(npts_per_read / rate)
+        # Gotta time-out our reads so that the tasks can be stopped at short notice
+        # without the read() calls blocking. I previously thought it was enough to call
+        # ClearTask() from another thread, but have observed that blocking reads do not
+        # always return when this is done. So we need a timeout as well.
+        TIMEOUT = min(float(npts_per_read / rate), self.MAX_READ_INTERVAL)
 
-        total_samples= nx * ny + 1
+        total_samples = nx * ny + 1
         samples_read = int32()
         last_counter_value = None
         try:
@@ -367,21 +371,26 @@ class App:
                 else:
                     samples_to_acquire = npts_per_read
                 
+                # Read exactly samples_to_acquire samples, looping if necessary to get
+                # them all:
+                got = 0
                 while True:
                     try:
                         self.CI_task.ReadCounterU32(
-                                samples_to_acquire,
+                                samples_to_acquire - got,
                                 TIMEOUT,
-                                CI_read_array,
-                                CI_read_array.size,
+                                CI_read_array[got:],
+                                CI_read_array[got:].size,
                                 samples_read,
                                 None,
                             )
+                        got += samples_read.value
                         break
                     except SamplesNotYetAvailableError:
+                        got += samples_read.value
                         continue
 
-                data = CI_read_array[: int(samples_read.value)]
+                data = CI_read_array[: samples_to_acquire]
                 
                 # # replace with fake data for testing, since simulated DAQmx devices
                 # # return all zeros for counter input
@@ -404,23 +413,26 @@ class App:
                 if scanning and scan_type is ScanType.CEM_COUNTS:
                     image_data = diffs
 
-
+                # Read exactly samples_to_acquire samples, looping if necessary to get
+                # them all:
+                got = 0
                 while True:
                     try:
                         self.AI_task.ReadAnalogF64(
-                            samples_to_acquire,
+                            samples_to_acquire - got,
                             TIMEOUT,
                             DAQmx_Val_GroupByScanNumber,
-                            AI_read_array,
-                            AI_read_array.size,
+                            AI_read_array[got:],
+                            AI_read_array[got:].size,
                             samples_read,
                             None,
                         )
                         break
                     except SamplesNotYetAvailableError:
+                        got += samples_read.value
                         continue
 
-                data = AI_read_array[: int(samples_read.value), :]
+                data = AI_read_array[: samples_to_acquire, :]
                 self.fc_data_queue.put(data[:, 0] / self.fc_gain)
                 self.target_data_queue.put(data[:, 1] / self.target_gain)
                 if scanning and scan_type is ScanType.TARGET_CURRENT:
@@ -433,6 +445,9 @@ class App:
                     start_ix = max(read_pos - 1, 0)
                     end_ix = start_ix + len(image_data)
                     if accumulate:
+                        # Set nans to zero bfore adding to them:
+                        chunk = self.image.ravel()[start_ix:end_ix]
+                        chunk[np.isnan(chunk)] = 0
                         self.image.ravel()[start_ix:end_ix] += image_data
                     else:
                         self.image.ravel()[start_ix:end_ix] = image_data
@@ -442,7 +457,6 @@ class App:
         except InvalidTaskError:
             # Task cleared by the main thread - we are being stopped.
             return
-
 
     def stop_tasks(self):
         """Clear all tasks and stop the acquisition thread, if running. This method is
