@@ -139,7 +139,6 @@ class App:
         self.cem_plot.setDownsampling(mode='peak')
         self.cem_data = RollingData(self.ui.spinBoxPlotBuffer.value())
         self.cem_data_queue = Queue()
-        self.cem_binwidth = 1 / self.ui.spinBoxSampleRate.value()
         self.cem_curve = self.cem_plot.plot(self.cem_data.data)
         self.cem_plot.setLabel('left', 'CEM counts', units='counts s⁻¹')
         self.cem_plot.showGrid(True, True)
@@ -150,7 +149,6 @@ class App:
         self.ui.pushButtonStartScan.clicked.connect(self.start_scan)
         self.ui.pushButtonStopScan.clicked.connect(self.stop_scan)
         self.ui.spinBoxPlotBuffer.valueChanged.connect(self.on_plot_buffer_changed)
-        self.ui.spinBoxSampleRate.valueChanged.connect(self.on_sample_rate_changed)
         self.ui.spinBoxFaradayCupGain.valueChanged.connect(self.on_fc_gain_changed)
         self.ui.spinBoxTargetGain.valueChanged.connect(self.on_target_gain_changed)
 
@@ -184,8 +182,8 @@ class App:
         # We need one extra point than pixels, since we want to acquire 1 dwell time
         # after each sample is output. So we'll be throwing away the first acquired
         # point.
-        Vx = np.append(Vx.flatten(), [0])
-        Vy = np.append(Vy.flatten(), [0])
+        Vx = np.append(Vx.flatten(), [Vx.mean()])
+        Vy = np.append(Vy.flatten(), [Vy.mean()])
     
         self.AO_task = Task("AO x-y scanning task")
 
@@ -725,9 +723,6 @@ class App:
 
         self.cem_data.resize(new_buffer_size)
         self.cem_curve.setData(self.cem_data.data)
-
-    def on_sample_rate_changed(self, value):
-        self.cem_binwidth = 1 / value
 
     def on_fc_gain_changed(self, value):
         self.fc_gain = 10 ** value
