@@ -192,9 +192,6 @@ class App:
 
     def zoom(self, center, factor):
 
-        nx = self.ui.spinBoxNx.value()
-        ny = self.ui.spinBoxNy.value()
-
         # Current view range in physical units:
         xmin = self.ui.doubleSpinBoxXmin.value()
         xmax = self.ui.doubleSpinBoxXmax.value()
@@ -207,6 +204,8 @@ class App:
         ymin_lim = self.ui.doubleSpinBoxYmin.minimum()
         ymax_lim = self.ui.doubleSpinBoxYmax.maximum()
         
+        ny, nx = self.image.shape
+
         # Clip to maximum allowed factor:
         max_factor = min(
             factor,
@@ -227,14 +226,13 @@ class App:
         self.set_range(xmin, xmax, ymin, ymax)
 
     def pan(self, x, y):
-        nx = self.ui.spinBoxNx.value()
-        ny = self.ui.spinBoxNy.value()
-
         # Current view range in physical units:
         xmin = self.ui.doubleSpinBoxXmin.value()
         xmax = self.ui.doubleSpinBoxXmax.value()
         ymin = self.ui.doubleSpinBoxYmin.value()
         ymax = self.ui.doubleSpinBoxYmax.value()
+
+        ny, nx = self.image.shape
 
         # Convert delta to physical units:
         x = (xmax - xmin) * x / nx
