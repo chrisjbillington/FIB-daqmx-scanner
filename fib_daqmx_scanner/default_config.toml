@@ -1,5 +1,5 @@
 [misc]
-    autoscale_image = true
+    autoscale_levels = true
 
 [scanning]
     xmin = -500

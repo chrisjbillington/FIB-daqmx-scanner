@@ -39,6 +39,9 @@ SOURCE_DIR = Path(__file__).absolute().parent
 CONFIG_FILE = Path(appdirs.user_config_dir(), 'fib-daqmx-scanner', 'config.toml')
 DEFAULT_CONFIG_FILE = SOURCE_DIR / 'default_config.toml'
 
+# Voltage range of FIB scanners:
+VMIN = -5
+VMAX = 5
 
 # TODO: use fill_value and initial_value = np.nan once this pyqtgraph bug fixed:
 # https://github.com/pyqtgraph/pyqtgraph/issues/1057
@@ -92,9 +95,23 @@ class State(IntEnum):
     RUNNING = 1
     SCANNING = 2
 
+
 class ScanType(IntEnum):
     CEM_COUNTS = 0
     TARGET_CURRENT = 1
+
+
+class ViewBox(pg.graphicsItems.ViewBox.ViewBox):
+    """pyqtgraph viewbox with signals we can use to hook into zoom and pan events"""
+    sigZoomed = QtCore.Signal(object, object)
+    sigPanned = QtCore.Signal(object, object)
+    def scaleBy(self, s=None, center=None, x=None, y=None):
+        self.sigZoomed.emit(center, s[0] if s is not None else y)
+        return super().scaleBy(s=s, center=center, x=x, y=y)
+
+    def translateBy(self, t=None, x=None, y=None):
+        self.sigPanned.emit(x, y)
+        return super().translateBy(t=t, x=x, y=y)
 
 class App:
     MAX_READ_PTS = 10000
@@ -103,9 +120,10 @@ class App:
     def __init__(self):
         self.ui = loader = UiLoader()
         self.ui = loader.load(Path(SOURCE_DIR, 'main.ui'))
-        self.image_view = pg.ImageView()
+        self.image_view = pg.ImageView(view=ViewBox())
         self.image = np.zeros((1, 1), dtype=int)
         self.image_rendering_required = threading.Event()
+        self.view_changed = threading.Event()
         self.image_view.setSizePolicy(
             QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding
         )
@@ -152,6 +170,12 @@ class App:
         self.ui.spinBoxFaradayCupGain.valueChanged.connect(self.on_fc_gain_changed)
         self.ui.spinBoxTargetGain.valueChanged.connect(self.on_target_gain_changed)
 
+        self.ui.doubleSpinBoxXcal.valueChanged.connect(self.on_xcal_changed)
+        self.ui.doubleSpinBoxYcal.valueChanged.connect(self.on_ycal_changed)
+
+        self.image_view.view.sigZoomed.connect(self.zoom)
+        self.image_view.view.sigPanned.connect(self.pan)
+
         self.render_plots_timer = QtCore.QTimer()
         self.render_plots_timer.timeout.connect(self.render_plots)
 
@@ -165,6 +189,91 @@ class App:
 
         self.load_config()
         self.ui.show()
+
+    def zoom(self, center, factor):
+
+        nx = self.ui.spinBoxNx.value()
+        ny = self.ui.spinBoxNy.value()
+
+        # Current view range in physical units:
+        xmin = self.ui.doubleSpinBoxXmin.value()
+        xmax = self.ui.doubleSpinBoxXmax.value()
+        ymin = self.ui.doubleSpinBoxYmin.value()
+        ymax = self.ui.doubleSpinBoxYmax.value()
+
+        # Maximum allowable range:
+        xmin_lim = self.ui.doubleSpinBoxXmin.minimum()
+        xmax_lim = self.ui.doubleSpinBoxXmax.maximum()
+        ymin_lim = self.ui.doubleSpinBoxYmin.minimum()
+        ymax_lim = self.ui.doubleSpinBoxYmax.maximum()
+        
+        # Clip to maximum allowed factor:
+        max_factor = min(
+            factor,
+            (xmax_lim - xmin_lim) / (xmax - xmin),
+            (ymax_lim - ymin_lim) / (ymax - ymin),
+        )
+
+        # Convert center to physical units
+        x0 = xmin + (xmax - xmin) * center.x() / nx
+        y0 = ymin + (ymax - ymin) * center.y() / ny
+        
+        # new range in physical units
+        xmin = x0 + factor * (xmin - x0)
+        xmax = x0 + factor * (xmax - x0)
+        ymin = y0 + factor * (ymin - y0)
+        ymax = y0 + factor * (ymax - y0)
+
+        self.set_range(xmin, xmax, ymin, ymax)
+
+    def pan(self, x, y):
+        nx = self.ui.spinBoxNx.value()
+        ny = self.ui.spinBoxNy.value()
+
+        # Current view range in physical units:
+        xmin = self.ui.doubleSpinBoxXmin.value()
+        xmax = self.ui.doubleSpinBoxXmax.value()
+        ymin = self.ui.doubleSpinBoxYmin.value()
+        ymax = self.ui.doubleSpinBoxYmax.value()
+
+        # Convert delta to physical units:
+        x = (xmax - xmin) * x / nx
+        y = (ymax - ymin) * y / ny
+
+        self.set_range(xmin + x, xmax + x, ymin + y, ymax + y)
+
+    def set_range(self, xmin, xmax, ymin, ymax):
+        """Set the new view range. The size of the range given must not exceed the
+        maximum, but if it is panned outside limits this method will pan it to within
+        limits"""
+
+        # Maximum allowable range:
+        xmin_lim = self.ui.doubleSpinBoxXmin.minimum()
+        xmax_lim = self.ui.doubleSpinBoxXmax.maximum()
+        ymin_lim = self.ui.doubleSpinBoxYmin.minimum()
+        ymax_lim = self.ui.doubleSpinBoxYmax.maximum()
+
+        xpan = min(0, xmin - xmin_lim) + max(0, xmax - xmax_lim)
+        ypan = min(0, ymin - ymin_lim) + max(0, ymax - ymax_lim)
+
+        self.ui.doubleSpinBoxXmin.setValue(xmin - xpan)
+        self.ui.doubleSpinBoxXmax.setValue(xmax - xpan)
+        self.ui.doubleSpinBoxYmin.setValue(ymin - ypan)
+        self.ui.doubleSpinBoxYmax.setValue(ymax - ypan)
+
+        self.view_changed.set()
+
+    def on_xcal_changed(self, value):
+        self.ui.doubleSpinBoxXmin.setMinimum(VMIN * value)
+        self.ui.doubleSpinBoxXmin.setMaximum(VMAX * value)
+        self.ui.doubleSpinBoxXmax.setMinimum(VMIN * value)
+        self.ui.doubleSpinBoxXmax.setMaximum(VMAX * value)
+
+    def on_ycal_changed(self, value):
+        self.ui.doubleSpinBoxYmin.setMinimum(VMIN * value)
+        self.ui.doubleSpinBoxYmin.setMaximum(VMAX * value)
+        self.ui.doubleSpinBoxYmax.setMinimum(VMIN * value)
+        self.ui.doubleSpinBoxYmax.setMaximum(VMAX * value)
 
     def setup_AO_task(self, nx, ny, rate):
         """Write data to, but don't start the analog output task for a scan"""
@@ -297,10 +406,16 @@ class App:
                 image_dtype = float
             else:
                 raise ValueError(scan_type)
-            # Blank the image if the dtype or shape has changed:
-            if (self.image.dtype, self.image.shape) != (image_dtype, (ny, nx)):
+            # Blank the image if the dtype or shape has changed, or if the view has
+            # changed:
+            fmt_change = (self.image.dtype, self.image.shape) != (image_dtype, (ny, nx))
+            if fmt_change or self.view_changed.is_set():
                 self.image = np.zeros((ny, nx), dtype=image_dtype)
-                self.image[:, :] = np.nan
+                # Ensure the new image is set, then auto pan and scale the image:
+                self.image_rendering_required.set()
+                self.render_plots()
+                self.image_view.view.autoRange()
+                self.view_changed.clear()
 
             # Start the scanning AO task:
             self.setup_AO_task(nx, ny, rate)
@@ -443,9 +558,6 @@ class App:
                     start_ix = max(read_pos - 1, 0)
                     end_ix = start_ix + len(image_data)
                     if accumulate:
-                        # Set nans to zero bfore adding to them:
-                        chunk = self.image.ravel()[start_ix:end_ix]
-                        chunk[np.isnan(chunk)] = 0
                         self.image.ravel()[start_ix:end_ix] += image_data
                     else:
                         self.image.ravel()[start_ix:end_ix] = image_data
@@ -504,12 +616,12 @@ class App:
 
         if self.image_rendering_required.is_set():
             self.image_rendering_required.clear()
-            autoscale = self.ui.toolButtonAutoScaleImage.isChecked()
+            autolevels = self.ui.toolButtonAutoLevels.isChecked()
             self.image_view.setImage(
                 self.image.swapaxes(-1, -2),
-                autoRange=autoscale,
-                autoLevels=autoscale,
-                autoHistogramRange=autoscale,
+                autoRange=False,
+                autoLevels=autolevels,
+                autoHistogramRange=autolevels,
             )
 
     def start(self):
@@ -648,8 +760,10 @@ class App:
 
         config = toml.load(CONFIG_FILE)
 
-        self.ui.toolButtonAutoScaleImage.setChecked((config['misc']['autoscale_image']))
+        self.ui.toolButtonAutoLevels.setChecked((config['misc']['autoscale_levels']))
 
+        self.ui.doubleSpinBoxXcal.setValue(config['scanning']['xcal'])
+        self.ui.doubleSpinBoxYcal.setValue(config['scanning']['ycal'])
         self.ui.doubleSpinBoxXmin.setValue(config['scanning']['xmin'])
         self.ui.doubleSpinBoxXmax.setValue(config['scanning']['xmax'])
         self.ui.doubleSpinBoxYmin.setValue(config['scanning']['ymin'])
@@ -657,8 +771,6 @@ class App:
         self.ui.spinBoxDwellTime.setValue(config['scanning']['dwell_time'])
         self.ui.spinBoxNx.setValue(config['scanning']['nx'])
         self.ui.spinBoxNy.setValue(config['scanning']['ny'])
-        self.ui.doubleSpinBoxXcal.setValue(config['scanning']['xcal'])
-        self.ui.doubleSpinBoxYcal.setValue(config['scanning']['ycal'])
         self.ui.comboBoxAcquire.setCurrentText(config['scanning']['acquire'])
 
         self.ui.doubleSpinBoxBeamBlankerVoltage.setValue(
@@ -679,7 +791,7 @@ class App:
 
     def save_config(self):
         config = {
-            'misc': {'autoscale_image': self.ui.toolButtonAutoScaleImage.isChecked()},
+            'misc': {'autoscale_levels': self.ui.toolButtonAutoLevels.isChecked()},
             'scanning': {
                 'xmin': self.ui.doubleSpinBoxXmin.value(),
                 'xmax': self.ui.doubleSpinBoxXmax.value(),
