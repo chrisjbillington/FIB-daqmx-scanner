@@ -5,6 +5,7 @@ from enum import IntEnum
 import threading
 from queue import Queue, Empty
 import ctypes
+import traceback
 
 import appdirs
 import toml
@@ -13,6 +14,8 @@ from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils import inmain_later, UiLoader
 import qtutils.icons
 import pyqtgraph as pg
+
+from fib_daqmx_scanner import __version__, DEFAULT_PORT
 
 from PyDAQmx import Task
 from PyDAQmx.DAQmxFunctions import (
@@ -34,6 +37,8 @@ from PyDAQmx.DAQmxConstants import (
 )
 
 from PyDAQmx.DAQmxTypes import int32, uInt32, uInt64
+
+from zprocess import ZMQServer
 
 SOURCE_DIR = Path(__file__).absolute().parent
 CONFIG_FILE = Path(appdirs.user_config_dir(), 'fib-daqmx-scanner', 'config.toml')
@@ -63,6 +68,11 @@ class RollingData:
             self.data = np.append(
                 np.full(newsize - len(self.data), fill_value, dtype=float), self.data
             )
+
+
+class AcquisitionStopped:
+    """Sentinel to be put to a queue of data to indicate acqusition was stopped before
+    the requested data was acquired"""
 
 
 def queue_getall(queue):
@@ -186,6 +196,9 @@ class App:
         self.AI_task = None
         self.CI_task = None
         self.acquisition_thread = None
+
+        self.count_rate_acquisition_queue = Queue()
+        self.count_rate_acquisition_in_progress = False
 
         self.load_config()
         self.ui.show()
@@ -520,7 +533,10 @@ class App:
                 else:
                     diffs = np.diff(data, prepend=last_counter_value)
                 last_counter_value = data[-1]
-                self.cem_data_queue.put(rate * diffs)
+                count_rate_data = rate * diffs
+                self.cem_data_queue.put(count_rate_data)
+                if self.count_rate_acquisition_in_progress:
+                    self.count_rate_acquisition_queue.put(count_rate_data)
                 if scanning and scan_type is ScanType.CEM_COUNTS:
                     image_data = diffs
 
@@ -578,6 +594,8 @@ class App:
             self.CI_task.ClearTask()
         if self.acquisition_thread is not None and self.acquisition_thread.is_alive():
             self.acquisition_thread.join()
+        if self.count_rate_acquisition_in_progress:
+            self.count_rate_acquisition_queue.put(AcquisitionStopped)
         self.acquisition_thread = None
         self.AI_task = None
         self.AO_task = None
@@ -703,6 +721,26 @@ class App:
         self.start_tasks(scanning=False)
         self.state = State.RUNNING
         self.update_widget_state()
+
+    def acquire_count_rate(self, npts):
+        """Acquire and return the next npts samples of the CEM count rate. This is
+        intended to be called by the remote server to return the count rate to a client
+        that is interested."""
+        self.count_rate_acquisition_in_progress = True
+        # Clear any junk out of the queue
+        queue_getall(self.count_rate_acquisition_queue)
+        data = []
+        npts_acquired = 0
+        while npts_acquired < npts:
+            data_chunk = self.count_rate_acquisition_queue.get()
+            if data_chunk is AcquisitionStopped:
+                self.count_rate_acquisition_in_progress = False
+                msg = "Acquistion was stopped before requested points could be acquired"
+                raise RuntimeError(msg)
+            npts_acquired += len(data_chunk)
+            data.append(data_chunk)
+        self.count_rate_acquisition_in_progress = False
+        return np.concatenate(data)[:npts]
 
     def update_widget_state(self):
         # Set widget enabled and and visibility state according to the current state.
@@ -841,7 +879,29 @@ class App:
         self.target_gain = 10 ** value
 
 
-def main():
+class RemoteServer(ZMQServer):
+    def __init__(self, port=DEFAULT_PORT):
+        ZMQServer.__init__(self, port=port)
+
+    def get_count_rate(self, npts):
+        data = app.acquire_count_rate(npts)
+        return data.mean(), data.std() / np.sqrt(npts)
+
+    def handler(self, request_data):
+        cmd, args, kwargs = request_data
+        if cmd == 'hello':
+            return 'hello'
+        elif cmd == '__version__':
+            return __version__
+        try:
+            return getattr(self, 'handle_' + cmd)(*args, **kwargs)
+        except Exception as e:
+            msg = traceback.format_exc()
+            msg = "FIB DAQmx Scanner server returned an exception:\n" + msg
+            return e.__class__(msg)
+
+
+if __name__ == '__main__':
     qapplication = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app = App()
     # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
@@ -852,7 +912,3 @@ def main():
     signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
     qapplication.exec()
     app.save_config()
-
-
-if __name__ == '__main__':
-    main()
