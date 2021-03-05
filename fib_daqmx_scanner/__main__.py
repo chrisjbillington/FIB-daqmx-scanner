@@ -40,6 +40,9 @@ from PyDAQmx.DAQmxTypes import int32, uInt32, uInt64
 
 from zprocess import ZMQServer
 
+# Elementary charge in coulombs, exact
+q_e = 1.602176634e-19
+
 SOURCE_DIR = Path(__file__).absolute().parent
 CONFIG_FILE = Path(appdirs.user_config_dir(), 'fib-daqmx-scanner', 'config.toml')
 DEFAULT_CONFIG_FILE = SOURCE_DIR / 'default_config.toml'
@@ -608,7 +611,7 @@ class App:
             self.target_curve.setData(self.target_data.data)
             self.ui.labelTargetCurrent.setText(
                 pg.functions.siFormat(
-                    self.target_data.data[-1], precision=5, suffix='A'
+                    self.target_data.data[-1], precision=4, suffix='A'
                 )
             )
 
@@ -617,18 +620,20 @@ class App:
             self.fc_data.add_data(np.concatenate(fc_data_chunks))
             self.fc_curve.setData(self.fc_data.data)
             self.ui.labelFaradayCupCurrent.setText(
-                pg.functions.siFormat(self.fc_data.data[-1], precision=5, suffix='A')
+                pg.functions.siFormat(self.fc_data.data[-1], precision=4, suffix='A')
             )
 
         cem_data_chunks = queue_getall(self.cem_data_queue)
         if cem_data_chunks:
             self.cem_data.add_data(np.concatenate(cem_data_chunks))
             self.cem_curve.setData(self.cem_data.data)
-            self.ui.labelCEMCounts.setText(
-                pg.functions.siFormat(
-                    self.cem_data.data[-1], precision=5, suffix='counts s⁻¹'
-                )
+            counts_string = pg.functions.siFormat(
+                self.cem_data.data[-1], precision=4, suffix='counts s⁻¹'
+            ).ljust(15, "\u2007")
+            current_string = pg.functions.siFormat(
+                self.cem_data.data[-1] * q_e, precision=4, suffix='A'
             )
+            self.ui.labelCEMCounts.setText(f'{counts_string} ({current_string})')
 
         if self.image_rendering_required.is_set():
             self.image_rendering_required.clear()
