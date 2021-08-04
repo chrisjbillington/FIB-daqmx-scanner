@@ -134,9 +134,11 @@ class App:
         self.ui = loader = UiLoader()
         self.ui = loader.load(Path(SOURCE_DIR, 'main.ui'))
         self.image_view = pg.ImageView(view=ViewBox())
+        self.image_view.getView().setBackgroundColor((0, 0, 50))
         self.image = np.zeros((1, 1), dtype=int)
         self.image_rendering_required = threading.Event()
         self.view_changed = threading.Event()
+        self.scan_complete = threading.Event()
         self.image_view.setSizePolicy(
             QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding
         )
@@ -276,6 +278,24 @@ class App:
         self.ui.doubleSpinBoxYmax.setValue(ymax - ypan)
 
         self.view_changed.set()
+
+    def set_range_fractional(self, xmin, xmax, ymin, ymax):
+        """Set the new view range as a fraction of the maximum view range.
+        That is, xmin, xmax, ymin, ymax must be between 0 and 1"""
+
+        # Maximum allowable range:
+        xmin_lim = self.ui.doubleSpinBoxXmin.minimum()
+        xmax_lim = self.ui.doubleSpinBoxXmax.maximum()
+        ymin_lim = self.ui.doubleSpinBoxYmin.minimum()
+        ymax_lim = self.ui.doubleSpinBoxYmax.maximum()
+        x_range = xmax_lim - xmin_lim
+        y_range = ymax_lim - ymin_lim
+        self.set_range(
+            xmin_lim + xmin * x_range,
+            xmin_lim + xmax * x_range,
+            ymin_lim + ymin * y_range,
+            ymin_lim + ymax * y_range
+        ) 
 
     def on_xcal_changed(self, value):
         self.ui.doubleSpinBoxXmin.setMinimum(VMIN * value)
@@ -705,6 +725,7 @@ class App:
             return
         self.state = State.SCANNING
         self.update_widget_state()
+        self.scan_complete.clear()
 
     def end_scan(self, acquisition_thread):
         """Run when a scan completes. Either stop or repeat scanning, depending on the
@@ -726,6 +747,7 @@ class App:
         self.start_tasks(scanning=False)
         self.state = State.RUNNING
         self.update_widget_state()
+        self.scan_complete.set()
 
     def acquire_count_rate(self, npts):
         """Acquire and return the next npts samples of the CEM count rate. This is
@@ -885,12 +907,20 @@ class App:
 
 
 class RemoteServer(ZMQServer):
-    def __init__(self, port=DEFAULT_PORT):
-        ZMQServer.__init__(self, port=port)
+    def __init__(self, port=DEFAULT_PORT, shared_secret=None):
+        ZMQServer.__init__(self, port=port, shared_secret=shared_secret)
 
-    def get_count_rate(self, npts):
+    def handle_get_count_rate(self, npts):
         data = app.acquire_count_rate(npts)
         return data.mean(), data.std() / np.sqrt(npts)
+
+    def handle_do_scan(self):
+        inmain(app.start_scan)
+        app.scan_complete.wait()
+        return app.image
+
+    def handle_set_range_fractional(self, xmin, xmax, ymin, ymax):
+        inmain(app.set_range_fractional, xmin, xmax, ymin, ymax)
 
     def handler(self, request_data):
         cmd, args, kwargs = request_data
@@ -909,6 +939,9 @@ class RemoteServer(ZMQServer):
 if __name__ == '__main__':
     qapplication = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app = App()
+    remote_server = RemoteServer(
+        shared_secret=Path('zpsecret-23ee8167.key').read_text()
+    )
     # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
     timer = QtCore.QTimer()
     timer.start(500)
@@ -917,3 +950,4 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, lambda *args: qapplication.exit())
     qapplication.exec()
     app.save_config()
+    remote_server.shutdown()

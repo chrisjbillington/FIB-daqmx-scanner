@@ -7,8 +7,17 @@ from fib_daqmx_scanner import DEFAULT_PORT
 class Client(ZMQClient):
     """A ZMQClient for communication with runmanager"""
 
-    def __init__(self, host=None, port=DEFAULT_PORT, timeout=60):
-        ZMQClient.__init__(self)
+    def __init__(
+        self,
+        host='localhost',
+        port=DEFAULT_PORT,
+        timeout=60,
+        allow_insecure=False,
+        shared_secret=None
+    ):
+        ZMQClient.__init__(
+            self, allow_insecure=allow_insecure, shared_secret=shared_secret
+        )
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -31,10 +40,26 @@ class Client(ZMQClient):
         mean and standard error in the mean"""
         return self.request('get_count_rate', npts=npts)
 
+    def do_scan(self):
+        """Do a scan with current settings and return the image"""
+        return self.request('do_scan')
 
-_default_client = Client()
+    def set_range_fractional(self, xmin, xmax, ymin, ymax):
+        """Set the new view range as a fraction of the maximum view range.
+        That is, xmin, xmax, ymin, ymax must be between 0 and 1"""
+        return self.request('set_range_fractional',  xmin, xmax, ymin, ymax)
+
+
+# not general, do a different way if packaging this as an app, config file or something
+from pathlib import Path
+this_folder = Path(__file__).absolute().parent
+shared_secret = (this_folder.parent / "zpsecret-23ee8167.key").read_text()
+
+_default_client = Client(shared_secret=shared_secret)
 
 get_count_rate = _default_client.get_count_rate
+do_scan = _default_client.do_scan
+set_range_fractional = _default_client.set_range_fractional
 
 if __name__ == '__main__':
     # Test
