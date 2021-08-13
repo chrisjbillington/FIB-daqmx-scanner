@@ -25,7 +25,7 @@
         <string>...</string>
        </property>
        <property name="icon">
-        <iconset resource="../../qtutils/icons/icons.qrc">
+        <iconset>
          <normaloff>:/qtutils/fugue/control.png</normaloff>:/qtutils/fugue/control.png</iconset>
        </property>
       </widget>
@@ -39,7 +39,7 @@
         <string>...</string>
        </property>
        <property name="icon">
-        <iconset resource="../../qtutils/icons/icons.qrc">
+        <iconset>
          <normaloff>:/qtutils/fugue/control-stop-square.png</normaloff>:/qtutils/fugue/control-stop-square.png</iconset>
        </property>
       </widget>
@@ -53,7 +53,7 @@
         <string>...</string>
        </property>
        <property name="icon">
-        <iconset resource="../../qtutils/icons/icons.qrc">
+        <iconset>
          <normaloff>:/qtutils/fugue/gradient.png</normaloff>:/qtutils/fugue/gradient.png</iconset>
        </property>
        <property name="checkable">
@@ -139,10 +139,10 @@
                <item>
                 <widget class="QPushButton" name="pushButtonStartScan">
                  <property name="text">
-                  <string>Start</string>
+                  <string>&amp;Start</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/control.png</normaloff>:/qtutils/fugue/control.png</iconset>
                  </property>
                 </widget>
@@ -150,10 +150,10 @@
                <item>
                 <widget class="QPushButton" name="pushButtonStopScan">
                  <property name="text">
-                  <string>Stop</string>
+                  <string>&amp;Stop</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/control-stop-square.png</normaloff>:/qtutils/fugue/control-stop-square.png</iconset>
                  </property>
                 </widget>
@@ -161,10 +161,10 @@
                <item>
                 <widget class="QPushButton" name="pushButtonRepeat">
                  <property name="text">
-                  <string>Repeat</string>
+                  <string>&amp;Repeat</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/arrow-repeat.png</normaloff>:/qtutils/fugue/arrow-repeat.png</iconset>
                  </property>
                  <property name="checkable">
@@ -175,10 +175,10 @@
                <item>
                 <widget class="QPushButton" name="pushButtonAccumulate">
                  <property name="text">
-                  <string>Accumulate</string>
+                  <string>&amp;Accumulate</string>
                  </property>
                  <property name="icon">
-                  <iconset resource="../../qtutils/icons/icons.qrc">
+                  <iconset>
                    <normaloff>:/qtutils/fugue/sum.png</normaloff>:/qtutils/fugue/sum.png</iconset>
                  </property>
                  <property name="checkable">
@@ -469,7 +469,7 @@
                 <string>Enable</string>
                </property>
                <property name="icon">
-                <iconset resource="../../qtutils/icons/icons.qrc">
+                <iconset>
                  <normaloff>:/qtutils/fugue/traffic-light-red.png</normaloff>:/qtutils/fugue/traffic-light-red.png</iconset>
                </property>
                <property name="checkable">

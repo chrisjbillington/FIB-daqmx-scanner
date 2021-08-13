@@ -11,7 +11,7 @@ import appdirs
 import toml
 import numpy as np
 from qtutils.qt import QtCore, QtGui, QtWidgets
-from qtutils import inmain_later, UiLoader
+from qtutils import inmain_later, UiLoader, inmain
 import qtutils.icons
 import pyqtgraph as pg
 
@@ -202,8 +202,8 @@ class App:
         self.CI_task = None
         self.acquisition_thread = None
 
-        self.count_rate_acquisition_queue = Queue()
-        self.count_rate_acquisition_in_progress = False
+        self.acquisition_queue = Queue()
+        self.acquisition_in_progress = False
 
         self.load_config()
         self.ui.show()
@@ -296,6 +296,11 @@ class App:
             ymin_lim + ymin * y_range,
             ymin_lim + ymax * y_range
         ) 
+
+    def set_resolution(self, nx, ny):
+        """Set the number of scan points in the x and y directions"""
+        self.ui.spinBoxNx.setValue(nx)
+        self.ui.spinBoxNy.setValue(ny)
 
     def on_xcal_changed(self, value):
         self.ui.doubleSpinBoxXmin.setMinimum(VMIN * value)
@@ -537,12 +542,12 @@ class App:
                         got += samples_read.value
                         continue
 
-                data = CI_read_array[: samples_to_acquire]
+                ci_data = CI_read_array[: samples_to_acquire]
                 
                 # # replace with fake data for testing, since simulated DAQmx devices
                 # # return all zeros for counter input
-                # data = np.random.randint(
-                #     0, 1000, size=len(data), dtype=np.uint32
+                # ci_data = np.random.randint(
+                #     0, 1000, size=len(ci_data), dtype=np.uint32
                 # ).cumsum() + (last_counter_value or 0)
 
                 # Compute differences in counter values.
@@ -551,15 +556,13 @@ class App:
                     # the second point instead. It will be ignored for the purposes
                     # of the image anyway, so this will only show up on the
                     # monitoring plot.
-                    diffs = np.diff(data, prepend=0)
+                    diffs = np.diff(ci_data, prepend=0)
                     diffs[0] = diffs[1]
                 else:
-                    diffs = np.diff(data, prepend=last_counter_value)
-                last_counter_value = data[-1]
+                    diffs = np.diff(ci_data, prepend=last_counter_value)
+                last_counter_value = ci_data[-1]
                 count_rate_data = rate * diffs
                 self.cem_data_queue.put(count_rate_data)
-                if self.count_rate_acquisition_in_progress:
-                    self.count_rate_acquisition_queue.put(count_rate_data)
                 if scanning and scan_type is ScanType.CEM_COUNTS:
                     image_data = diffs
 
@@ -582,11 +585,20 @@ class App:
                         got += samples_read.value
                         continue
 
-                data = AI_read_array[: samples_to_acquire, :]
-                self.fc_data_queue.put(data[:, 0] / self.fc_gain)
-                self.target_data_queue.put(data[:, 1] / self.target_gain)
+                ai_data = AI_read_array[: samples_to_acquire, :]
+                fc_data = ai_data[:, 0] / self.fc_gain
+                target_data = ai_data[:, 1] / self.target_gain
+                self.fc_data_queue.put(fc_data)
+                self.target_data_queue.put(target_data)
                 if scanning and scan_type is ScanType.TARGET_CURRENT:
-                    image_data = data[:, 1] / self.target_gain
+                    image_data = target_data
+                    image_data = -image_data
+
+                if self.acquisition_in_progress:
+                    # Order of data is faraday cup current, target current, count rates
+                    self.acquisition_queue.put(
+                        np.stack([fc_data, target_data, count_rate_data], axis=-1)
+                    )
 
                 if scanning:
                     # Ignore first point:
@@ -617,8 +629,8 @@ class App:
             self.CI_task.ClearTask()
         if self.acquisition_thread is not None and self.acquisition_thread.is_alive():
             self.acquisition_thread.join()
-        if self.count_rate_acquisition_in_progress:
-            self.count_rate_acquisition_queue.put(AcquisitionStopped)
+        if self.acquisition_in_progress:
+            self.acquisition_queue.put(AcquisitionStopped)
         self.acquisition_thread = None
         self.AI_task = None
         self.AO_task = None
@@ -749,25 +761,32 @@ class App:
         self.update_widget_state()
         self.scan_complete.set()
 
-    def acquire_count_rate(self, npts):
-        """Acquire and return the next npts samples of the CEM count rate. This is
-        intended to be called by the remote server to return the count rate to a client
-        that is interested."""
-        self.count_rate_acquisition_in_progress = True
+    def acquire(self, npts):
+        """Acquire and return the next npts samples of the, faraday cup
+        current, target current, and CEM count rate. This is intended to be
+        called by the remote server to return the count rate and currents to a
+        client that is interested."""
+        self.acquisition_in_progress = True
         # Clear any junk out of the queue
-        queue_getall(self.count_rate_acquisition_queue)
+        queue_getall(self.acquisition_queue)
         data = []
         npts_acquired = 0
         while npts_acquired < npts:
-            data_chunk = self.count_rate_acquisition_queue.get()
+            data_chunk = self.acquisition_queue.get()
             if data_chunk is AcquisitionStopped:
-                self.count_rate_acquisition_in_progress = False
+                self.acquisition_in_progress = False
                 msg = "Acquistion was stopped before requested points could be acquired"
                 raise RuntimeError(msg)
             npts_acquired += len(data_chunk)
             data.append(data_chunk)
-        self.count_rate_acquisition_in_progress = False
-        return np.concatenate(data)[:npts]
+        self.acquisition_in_progress = False
+        return np.concatenate(data)[:npts].T
+
+    def acquire_count_rate(self, npts):
+        """Acquire and return the next npts samples of the CEM count rate. This is
+        intended to be called by the remote server to return the count rate to a client
+        that is interested."""
+        return self.acquire(npts)[:, 2]
 
     def update_widget_state(self):
         # Set widget enabled and and visibility state according to the current state.
@@ -914,6 +933,9 @@ class RemoteServer(ZMQServer):
         data = app.acquire_count_rate(npts)
         return data.mean(), data.std() / np.sqrt(npts)
 
+    def handle_acquire(self, npts):
+        return app.acquire(npts)
+
     def handle_do_scan(self):
         inmain(app.start_scan)
         app.scan_complete.wait()
@@ -921,6 +943,9 @@ class RemoteServer(ZMQServer):
 
     def handle_set_range_fractional(self, xmin, xmax, ymin, ymax):
         inmain(app.set_range_fractional, xmin, xmax, ymin, ymax)
+
+    def handle_set_resolution(self, nx, ny):
+        inmain(app.set_resolution, nx, ny)
 
     def handler(self, request_data):
         cmd, args, kwargs = request_data

@@ -40,6 +40,11 @@ class Client(ZMQClient):
         mean and standard error in the mean"""
         return self.request('get_count_rate', npts=npts)
 
+    def acquire(self, npts=10):
+        """acquire and return the next npts points of the faraday cup current,
+        target current, and count rate, as arrays."""
+        return self.request('acquire', npts=npts)
+
     def do_scan(self):
         """Do a scan with current settings and return the image"""
         return self.request('do_scan')
@@ -48,6 +53,10 @@ class Client(ZMQClient):
         """Set the new view range as a fraction of the maximum view range.
         That is, xmin, xmax, ymin, ymax must be between 0 and 1"""
         return self.request('set_range_fractional',  xmin, xmax, ymin, ymax)
+
+    def set_resolution(self, nx, ny):
+        """Set the number of scan points in the x and y directions"""
+        return self.request('set_resolution', nx, ny)
 
 
 # not general, do a different way if packaging this as an app, config file or something
@@ -58,8 +67,10 @@ shared_secret = (this_folder.parent / "zpsecret-23ee8167.key").read_text()
 _default_client = Client(shared_secret=shared_secret)
 
 get_count_rate = _default_client.get_count_rate
+acquire = _default_client.acquire
 do_scan = _default_client.do_scan
 set_range_fractional = _default_client.set_range_fractional
+set_resolution = _default_client.set_resolution
 
 if __name__ == '__main__':
     # Test
