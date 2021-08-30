@@ -933,6 +933,12 @@ class RemoteServer(ZMQServer):
         data = app.acquire_count_rate(npts)
         return data.mean(), data.std() / np.sqrt(npts)
 
+    def handle_get_dwell_time(self):
+        return inmain(app.ui.spinBoxDwellTime.value) * 1e-6
+
+    def handle_get_sample_rate(self):
+        return inmain(app.ui.spinBoxSampleRate.value)
+
     def handle_acquire(self, npts):
         return app.acquire(npts)
 

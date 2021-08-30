@@ -40,6 +40,12 @@ class Client(ZMQClient):
         mean and standard error in the mean"""
         return self.request('get_count_rate', npts=npts)
 
+    def get_dwell_time(self):
+        return self.request('get_dwell_time')
+
+    def get_sample_rate(self):
+        return self.request('get_sample_rate')
+
     def acquire(self, npts=10):
         """acquire and return the next npts points of the faraday cup current,
         target current, and count rate, as arrays."""
@@ -71,6 +77,8 @@ acquire = _default_client.acquire
 do_scan = _default_client.do_scan
 set_range_fractional = _default_client.set_range_fractional
 set_resolution = _default_client.set_resolution
+get_dwell_time = _default_client.get_dwell_time
+get_sample_rate = _default_client.get_sample_rate
 
 if __name__ == '__main__':
     # Test
